@@ -106,6 +106,7 @@ def init_training():
     return states, actions, actions_log_probability, values, rewards, terminated, truncated, episode_reward
 
 
+
 def forward_pass(env, agent, discount_factor):
     states, actions, actions_log_prob, values, rewards, terminated, truncated, episode_reward = init_training()
     state, _ = env.reset()
@@ -116,25 +117,29 @@ def forward_pass(env, agent, discount_factor):
         states.append(state)
 
         mu, std, value_pred = agent(state)
-
         dist = Normal(mu, std)
         action = dist.sample()
 
         log_prob_action = dist.log_prob(action).sum(dim=-1)
         action_numpy = action.squeeze(0).detach().cpu().numpy()
         state, reward, terminated, truncated, _ = env.step(action_numpy)
+
         actions.append(action)
         actions_log_prob.append(log_prob_action)
         values.append(value_pred)
         rewards.append(reward)
         episode_reward += reward
+
     states = torch.cat(states).to(device)
     actions = torch.cat(actions).to(device)
     actions_log_prob = torch.cat(actions_log_prob).to(device)
     values = torch.cat(values).squeeze(-1).to(device)
+
     returns = calculate_returns(rewards, discount_factor).to(device)
     advantages = calculate_advantages(returns, values)
+
     return episode_reward, states, actions, actions_log_prob, advantages, returns
+
 
 
 def update_policy(
@@ -270,11 +275,14 @@ def run_ppo():
     value_losses = []
     agent = create_agent(HIDDEN_DIMENSIONS, DROPOUT).to(device)
     optimizer = optim.Adam(agent.parameters(), lr=LEARNING_RATE)
+
     for episode in range(1, MAX_EPISODES+1):
+
         train_reward, states, actions, actions_log_probability, advantages, returns = forward_pass(
                 env_train,
                 agent,
                 DISCOUNT_FACTOR)
+
         policy_loss, value_loss = update_policy(
                 agent,
                 states,
@@ -286,11 +294,14 @@ def run_ppo():
                 PPO_STEPS,
                 EPSILON,
                 ENTROPY_COEFFICIENT)
+
         policy_losses.append(policy_loss)
         value_losses.append(value_loss)
         train_rewards.append(train_reward)
+
         mean_train_rewards = np.mean(train_rewards[-N_TRIALS:])
         mean_test_rewards = np.mean(test_rewards[-N_TRIALS:])
+
         if episode % PRINT_INTERVAL == 0:
             print(f'Episode: {episode:3} | Mean Rewards: {mean_train_rewards:3.1f}')
         if mean_test_rewards >= REWARD_THRESHOLD:
