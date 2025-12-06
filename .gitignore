@@ -2,3 +2,6 @@
 /runs
 /cleanrl
 /PPO-Continuous-Pytorch
+*.zip
+*/log*/
+/__pycache__
