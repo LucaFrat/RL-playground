@@ -260,7 +260,7 @@ def plot_losses(policy_losses, value_losses):
 def run_ppo():
     MAX_EPISODES = 20000
     DISCOUNT_FACTOR = 0.99
-    REWARD_THRESHOLD = 10
+    REWARD_THRESHOLD = 100
     PRINT_INTERVAL = 50
     PPO_STEPS = 8
     N_TRIALS = 100
