@@ -3,5 +3,6 @@
 /cleanrl
 /PPO-Continuous-Pytorch
 *.zip
-*/log*/
+/logs
 /__pycache__
+/videos

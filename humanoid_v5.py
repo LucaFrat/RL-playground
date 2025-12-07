@@ -9,22 +9,29 @@ import numpy as np
 import time
 import matplotlib.pyplot as plt
 
+
+
+def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
+    torch.nn.init.orthogonal_(layer.weight, std)
+    torch.nn.init.constant_(layer.bias, bias_const)
+    return layer
+
 class MLP(nn.Module):
-    def __init__(self, in_dim, out_dim, hid_dim=64):
+    def __init__(self, in_dim, out_dim, hid_dim=512):
         super(MLP, self).__init__()
         self.actor_net = nn.Sequential(
-            nn.Linear(in_dim, hid_dim),
+            layer_init(nn.Linear(in_dim, hid_dim)),
             nn.Tanh(),
-            nn.Linear(hid_dim, hid_dim),
+            layer_init(nn.Linear(hid_dim, hid_dim)),
             nn.Tanh(),
-            nn.Linear(hid_dim, out_dim)
+            layer_init(nn.Linear(hid_dim, out_dim), std=0.01) # Reduced gain for initial stability
         )
         self.critic_net = nn.Sequential(
-            nn.Linear(in_dim, hid_dim),
+            layer_init(nn.Linear(in_dim, hid_dim)),
             nn.Tanh(),
-            nn.Linear(hid_dim, hid_dim),
+            layer_init(nn.Linear(hid_dim, hid_dim)),
             nn.Tanh(),
-            nn.Linear(hid_dim, 1)
+            layer_init(nn.Linear(hid_dim, 1), std=1.0)
         )
         self.actor_log_std = nn.Parameter(torch.zeros(1, out_dim))
 
@@ -34,18 +41,20 @@ class MLP(nn.Module):
         std = self.actor_log_std.exp().expand_as(mu)
         return mu, std, value_pred
 
-def calculate_returns(rewards, discount_factor):
-    returns = []
-    cumulative_reward = 0
-    for reward in reversed(rewards):
-        cumulative_reward = reward + cumulative_reward * discount_factor
-        returns.insert(0, cumulative_reward)
-    return torch.tensor(returns, dtype=torch.float32)
+def calculate_gae(rewards, values, dones, gamma=0.99, lam=0.95):
+    advantages = []
+    last_advantage = 0
 
-def calculate_advantages(returns, values):
-    advantages = returns - values
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-    return advantages
+    for t in reversed(range(len(rewards))):
+        mask = 1.0 - dones[t]
+        delta = rewards[t] + gamma * values[t+1] * mask - values[t]
+        last_advantage = delta + gamma * lam * mask * last_advantage
+        advantages.insert(0, last_advantage)
+
+    advantages = torch.tensor(advantages, dtype=torch.float32)
+    # Returns are calculated as Advantage + Value
+    returns = advantages + torch.tensor(values[:-1], dtype=torch.float32)
+    return advantages, returns
 
 def calculate_surrogate_loss(actions_log_prob_old, actions_log_prob_new, advantages, epsilon):
     policy_ratio = (actions_log_prob_new - actions_log_prob_old).exp()
@@ -67,101 +76,94 @@ def plot_train_rewards(train_rewards):
     plt.grid()
     plt.show()
 
-def evaluate_policy(env, agent):
+def evaluate_policy(env, agent, recording_config):
+    # Ensure agent is in eval mode and on CPU for evaluation (simplest for single env)
     agent.eval()
 
+    # Trigger recording
     recording_config['is_eval'] = True
     state, _ = env.reset()
-    recording_config['is_eval'] = False
+    recording_config['is_eval'] = False # Reset immediately
 
     terminated, truncated = False, False
+    true_reward = 0.0
 
     while not (terminated or truncated):
-        state = torch.FloatTensor(state).unsqueeze(0).to(device)
+        # Hybrid: Eval on CPU is fine
+        state = torch.FloatTensor(state).unsqueeze(0)
         with torch.no_grad():
             mu, _, _ = agent(state)
-            action = mu.squeeze(0).cpu().numpy()
+            action = mu.squeeze(0).numpy() # Deterministic action for eval
+
         state, _, terminated, truncated, info = env.step(action)
+
         if terminated or truncated:
             if "episode" in info:
                 true_reward = info["episode"]["r"]
     return true_reward
 
-
-
+# --- HYPERPARAMETERS ---
 LEARNING_RATE = 3e-4
-NUM_EPISODES = 3_000
+TOTAL_TIMESTEPS = 10_000_000  # INCREASED: Humanoid needs ~2M+ steps
 DISCOUNT_FACTOR = 0.99
-BATCH_SIZE = 64
+BATCH_SIZE = 1024            # Increased for GPU efficiency
 PPO_STEPS = 10
 EPSILON = 0.2
 ENTROPY = 0.0
-MIN_BUFFER_SIZE = 2048
+MIN_BUFFER_SIZE = 4096
 
-ANNEAL_LR = True
-USE_GPU = False
+# Define device but don't move agent yet
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Training Device: {device}")
 
-device = torch.device("cuda" if torch.cuda.is_available() and USE_GPU else "cpu")
-print(f"Device: {device}")
-
-env = gym.make("Hopper-v5", render_mode="rgb_array")
-
+env = gym.make("Humanoid-v5", render_mode="rgb_array")
 env = gym.wrappers.RecordEpisodeStatistics(env)
-
 env = gym.wrappers.ClipAction(env)
 env = gym.wrappers.NormalizeObservation(env)
 env = gym.wrappers.TransformObservation(env, lambda obs: np.clip(obs, -10, 10), env.observation_space)
 env = gym.wrappers.NormalizeReward(env)
 env = gym.wrappers.TransformReward(env, lambda reward: np.clip(reward, -10, 10))
 
-recording_config = {
-    'is_eval': False
-}
+recording_config = {'is_eval': False}
 def video_trigger(episode_id):
-    # Record every 1000th episode (Training)
-    if episode_id % 1000 == 0:
-        return True
-    # OR Record if we are manually forcing it (Evaluation)
-    if recording_config['is_eval']:
-        return True
+    if episode_id % 2000 == 0: return True
+    if recording_config['is_eval']: return True
     return False
 
 env = gym.wrappers.RecordVideo(
     env=env,
-    video_folder='./videos/hopper',
-    name_prefix='hopper',
+    video_folder='./videos/humanoid',
+    name_prefix='humanoid_agent',
     episode_trigger=video_trigger,
     disable_logger=True
 )
+
 obs_space = env.observation_space.shape[0]
 action_space = env.action_space.shape[0]
-agent = MLP(obs_space, action_space).to(device)
-optimizer = optim.Adam(agent.parameters(), lr=LEARNING_RATE, eps=1e-5)
 
-# Buffer to store trajectories across episodes
-buffer = {
-    'states': [], 'actions': [], 'log_probs': [], 'rewards': [], 'values': [], 'dones': []
-}
+# HYBRID: Initialize Agent on CPU (Faster Collection)
+agent = MLP(obs_space, action_space).to("cpu")
+optimizer = optim.Adam(agent.parameters(), lr=LEARNING_RATE)
+
+buffer = {'states': [], 'actions': [], 'log_probs': [], 'rewards': [], 'values': [], 'advantages': []}
 train_rewards = []
 start_time = time.time()
 
 print("Starting training...")
 
-for episode in range(NUM_EPISODES+1):
+global_counter = 0
+episode_num = 0
 
-    if ANNEAL_LR:
-        fraction = 1.0 - (episode - 1.0) / NUM_EPISODES
-        new_lr = fraction * LEARNING_RATE
-        optimizer.param_groups[0]["lr"] = new_lr
-
+while global_counter < TOTAL_TIMESTEPS:
     state, _ = env.reset()
     terminated, truncated = False, False
+    episode_num += 1
 
-    # Temporary buffer for the current episode
     ep_states, ep_actions, ep_log_probs, ep_rewards, ep_values = [], [], [], [], []
 
+    # --- COLLECTION PHASE (CPU) ---
     while not (terminated or truncated):
-        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+        state_tensor = torch.FloatTensor(state).unsqueeze(0) # Keep on CPU
 
         with torch.no_grad():
             mu, std, value_pred = agent(state_tensor)
@@ -169,65 +171,68 @@ for episode in range(NUM_EPISODES+1):
             action = dist.sample()
             log_prob_action = dist.log_prob(action).sum(dim=-1)
 
-        action_numpy = action.squeeze(0).cpu().numpy()
+        action_numpy = action.squeeze(0).numpy()
         next_state, reward, terminated, truncated, info = env.step(action_numpy)
+        global_counter += 1
 
-        # Store step data
-        ep_states.append(state_tensor.cpu())
-        ep_actions.append(action.cpu())
-        ep_log_probs.append(log_prob_action.cpu())
+        # Store purely on CPU
+        ep_states.append(state_tensor)
+        ep_actions.append(action)
+        ep_log_probs.append(log_prob_action)
         ep_rewards.append(reward)
-        ep_values.append(value_pred.cpu())
+        ep_values.append(value_pred)
 
         state = next_state
 
-        # Logging: If episode ended, capture the TRUE reward from RecordEpisodeStatistics
         if terminated or truncated:
             if "episode" in info:
                 true_reward = info["episode"]["r"]
                 train_rewards.append(true_reward)
-                if len(train_rewards) % 20 == 0:
-                     print(f"Episode {episode} | Avg Reward: {np.mean(train_rewards[-20:]):.1f}")
+                if len(train_rewards) % 2_000 == 0:
+                     print(f"Step: {global_counter} | Episode {episode_num} | Avg Reward: {np.mean(train_rewards[-20:]):.1f}")
 
-    # Process episode data
-    # Calculate returns/advantages for this episode immediately
-    ep_returns = calculate_returns(ep_rewards, DISCOUNT_FACTOR)
-    ep_values = torch.cat(ep_values).squeeze(-1)
-    ep_advantages = calculate_advantages(ep_returns, ep_values)
+        # Safety break
+        if global_counter >= TOTAL_TIMESTEPS:
+            break
 
-    # Add to global buffer
-    buffer['states'].append(torch.cat(ep_states).to(device))
-    buffer['actions'].append(torch.cat(ep_actions).to(device))
-    buffer['log_probs'].append(torch.cat(ep_log_probs).to(device))
-    buffer['rewards'].append(ep_returns)     # Storing returns directly
-    buffer['values'].append(ep_values)
-    buffer['dones'].append(ep_advantages)    # Storing advantages directly
+    # Bootstrap value for GAE
+    with torch.no_grad():
+        _, _, next_value = agent(torch.FloatTensor(state).unsqueeze(0))
+        next_value = next_value.item()
+    ep_values.append(next_value)
 
-    # Check total collected steps
+    # GAE Calculation
+    ep_dones = [0] * (len(ep_rewards) - 1) + [1]
+    ep_advantages, ep_returns = calculate_gae(ep_rewards, ep_values, ep_dones)
+    ep_advantages = (ep_advantages - ep_advantages.mean()) / (ep_advantages.std() + 1e-8)
+
+    # Store in global buffer (CPU)
+    buffer['states'].append(torch.cat(ep_states))
+    buffer['actions'].append(torch.cat(ep_actions))
+    buffer['log_probs'].append(torch.cat(ep_log_probs))
+    buffer['rewards'].append(ep_returns)
+    buffer['advantages'].append(ep_advantages)
+
+    # --- UPDATE PHASE (GPU) ---
     total_steps = sum(len(t) for t in buffer['states'])
 
-    # UPDATE NETWORK Only if we have enough data (Stable PPO)
     if total_steps >= MIN_BUFFER_SIZE:
+        # 1. Move Agent to GPU
+        agent.to(device)
 
-        # Flatten the buffer
-        b_states = torch.cat(buffer['states'])
-        b_actions = torch.cat(buffer['actions'])
-        b_log_probs = torch.cat(buffer['log_probs'])
-        b_returns = torch.cat(buffer['rewards'])
-        b_advantages = torch.cat(buffer['dones'])
+        # 2. Prepare Batch on GPU
+        b_states = torch.cat(buffer['states']).to(device)
+        b_actions = torch.cat(buffer['actions']).to(device)
+        b_log_probs = torch.cat(buffer['log_probs']).to(device)
+        b_returns = torch.cat(buffer['rewards']).to(device)
+        b_advantages = torch.cat(buffer['advantages']).to(device)
 
-        # Create Dataset
         dataset = TensorDataset(b_states, b_actions, b_log_probs, b_advantages, b_returns)
         loader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True)
 
         for _ in range(PPO_STEPS):
-            for b_s, b_a, b_lp_old, b_adv, b_ret in loader:
-
-                b_s = b_s.to(device)
-                b_a = b_a.to(device)
-                b_lp_old = b_lp_old.to(device)
-                b_adv = b_adv.to(device)
-                b_ret = b_ret.to(device)
+            for batch in loader:
+                b_s, b_a, b_lp_old, b_adv, b_ret = batch
 
                 mu, std, value_pred = agent(b_s)
                 value_pred = value_pred.squeeze(-1)
@@ -245,16 +250,19 @@ for episode in range(NUM_EPISODES+1):
                 nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
                 optimizer.step()
 
-        # Clear buffer after update
+        # 3. Move Agent back to CPU for collection
+        agent.to("cpu")
+
+        # Clear buffer
         for k in buffer: buffer[k] = []
 
+# Final Evaluation
 eval_rewards = []
-for _ in range(5):
-    episode_reward = evaluate_policy(env, agent)
+for _ in range(2):
+    episode_reward = evaluate_policy(env, agent, recording_config)
     eval_rewards.append(episode_reward)
 
 print(f"Mean Eval Reward: {np.average(eval_rewards):.1f}")
-
 env.close()
 print()
 print("---- ---- ---- ----")
