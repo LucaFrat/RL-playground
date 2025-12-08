@@ -11,8 +11,8 @@ import matplotlib.pyplot as plt
 
 
 # --- HYPERPARAMETERS ---
-LEARNING_RATE = 3e-4
-TOTAL_TIMESTEPS = 1_000_000
+LEARNING_RATE = 5e-4
+TOTAL_TIMESTEPS = 20_000_000
 NUM_ENVS = 32
 STEPS_PER_ENV = 128
 BATCH_SIZE = NUM_ENVS * STEPS_PER_ENV
@@ -191,7 +191,7 @@ for update in range(1, num_updates + 1):
 
         action_cpu = action.cpu().numpy()
         real_next_obs, reward, terminations, truncations, infos = envs.step(action_cpu)
-        print(infos)
+        # print(infos)
 
         next_done = np.logical_or(terminations, truncations)
 
@@ -199,20 +199,17 @@ for update in range(1, num_updates + 1):
         next_obs = torch.tensor(real_next_obs).to(device)
         next_done = torch.tensor(next_done, dtype=torch.float32).to(device)
 
+        if "episode" in infos:
+            true_rewards = infos['episode']['r']
+            true_rewards = true_rewards[true_rewards > 0.1]
 
-        # if "final_info" in infos:
-        #         for info in infos["final_info"]:
-        #             if info and "episode" in info:
-        #                 print(f"global_step={global_step}, episodic_return={info['episode']['r']}")
+            if len(true_rewards) > 0:
+                train_rewards.extend(true_rewards)
+                train_steps.extend([global_step] * len(true_rewards))
 
-        # if "final_info" in infos:
-        #     for info in infos["final_info"]:
-        #         if info and "episode" in info:
-        #             r = info["episode"]["r"]
-        #             train_rewards.append(r)
-        #             train_steps.append(global_step)
-        #             if len(train_rewards) % 20 == 0:
-        #                  print(f"Step: {global_step} | Avg Reward: {np.mean(train_rewards[-50:]):.1f}")
+                if len(train_rewards) % 500 == 0:
+                     print(f"Step: {global_step} | Avg Reward: {np.mean(train_rewards[-50:]):.1f}")
+
 
     # --- 2. GAE CALCULATION ---
     with torch.no_grad():
@@ -338,7 +335,7 @@ while not (terminated or truncated):
             if "episode" in info:
                 true_reward = info["episode"]["r"]
 
-print(f"Mean Eval Reward: {np.average(true_reward):.1f}")
+print(f"Mean Eval Reward: {true_reward:.1f}")
 
 
 env.close()
