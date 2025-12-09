@@ -17,13 +17,13 @@ os.makedirs(logs_dir, exist_ok=True)
 
 
 device = "cpu"
-TIMESTEPS = 2_000_000
+TIMESTEPS = 30_000_000
 ITERATIONS = 10
 
 
 def train():
 
-    env = make_vec_env("Hopper-v5", n_envs=8, vec_env_cls=SubprocVecEnv)
+    env = make_vec_env("Hopper-v5", n_envs=12, vec_env_cls=SubprocVecEnv)
     env = VecNormalize(env, norm_obs=True, norm_reward=True, clip_obs=10.)
 
     model = PPO(
@@ -32,7 +32,6 @@ def train():
         verbose=1,
         device=device,
         tensorboard_log=logs_dir,
-        batch_size=128,
         target_kl=0.03
     )
 
